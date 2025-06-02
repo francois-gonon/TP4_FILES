@@ -2,12 +2,15 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
-from airflow.providers.postgres.hooks.postgres import PostgresHook
 import boto3
 from minio import Minio
-import pandas as pd
 import requests
 import os
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Default arguments for the DAG
 default_args = {
@@ -17,28 +20,23 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(minutes=2),
 }
 
 # DAG definition
 dag = DAG(
-    'medallion_data_pipeline',
+    'medallion_pipeline',
     default_args=default_args,
-    description='Data pipeline with medallion architecture using Spark, Airflow, and MinIO',
+    description='Data pipeline with medallion architecture (Bronze, Silver, Gold)',
     schedule_interval=timedelta(hours=6),
     catchup=False,
-    tags=['data-pipeline', 'medallion', 'spark'],
+    tags=['data-pipeline', 'medallion', 'simple'],
 )
 
 # MinIO configuration
 MINIO_ENDPOINT = 'minio:9000'
 MINIO_ACCESS_KEY = 'minioadmin'
 MINIO_SECRET_KEY = 'minioadmin123'
-MINIO_SECURE = False
-
-# S3 source configuration
-SOURCE_BUCKET = 'epf-big-data-processing'
-SOURCE_PREFIX = 'tp3-4/sources'
 
 def create_minio_client():
     """Create MinIO client"""
@@ -46,206 +44,298 @@ def create_minio_client():
         MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
-        secure=MINIO_SECURE
+        secure=False
     )
 
-def ingest_from_s3(**context):
+def check_services(**context):
+    """Check if all services are running"""
+    try:
+        # Check MinIO
+        minio_client = create_minio_client()
+        buckets = minio_client.list_buckets()
+        logger.info(f"✅ MinIO is running. Found buckets: {[b.name for b in buckets]}")
+        
+        # Check Spark
+        try:
+            response = requests.get('http://spark:8080/json/', timeout=10)
+            if response.status_code == 200:
+                logger.info("✅ Spark is running")
+            else:
+                logger.warning(f"⚠️ Spark responded with status: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Spark check failed: {str(e)}")
+        
+        logger.info("✅ Service check completed")
+        
+    except Exception as e:
+        logger.error(f"❌ Service check failed: {str(e)}")
+        raise
+
+def ingest_sample_data(**context):
     """
-    Ingest data from external S3 to MinIO landing zone
+    Create sample data and ingest to landing zone
     """
     try:
-        # Create MinIO client
         minio_client = create_minio_client()
         
-        # Create S3 client for source data
-        s3_client = boto3.client('s3')
+        # Create sample CSV data
+        sample_data = """id,name,department,salary,date
+1,John Doe,Sales,50000,2025-01-01
+2,Jane Smith,Marketing,60000,2025-01-02
+3,Bob Johnson,IT,70000,2025-01-03
+4,Alice Wilson,HR,55000,2025-01-04
+5,Charlie Brown,Sales,48000,2025-01-05
+6,Diana Prince,IT,75000,2025-01-06
+7,Eva Green,Marketing,62000,2025-01-07
+8,Frank Miller,HR,53000,2025-01-08"""
+
+        # Save to local file first
+        filename = f"sample_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        local_path = f"/tmp/{filename}"
         
-        # List objects in source bucket
-        response = s3_client.list_objects_v2(
-            Bucket=SOURCE_BUCKET,
-            Prefix=SOURCE_PREFIX
-        )
+        with open(local_path, 'w') as f:
+            f.write(sample_data)
         
-        if 'Contents' not in response:
-            print(f"No objects found in {SOURCE_BUCKET}/{SOURCE_PREFIX}")
-            return
+        # Upload to MinIO landing bucket
+        minio_client.fput_object('landing', filename, local_path)
         
-        # Download and upload each file
-        for obj in response['Contents']:
-            key = obj['Key']
-            filename = key.split('/')[-1]
-            
-            if filename:  # Skip directories
-                print(f"Processing file: {filename}")
-                
-                # Download from S3
-                s3_client.download_file(SOURCE_BUCKET, key, f'/tmp/{filename}')
-                
-                # Upload to MinIO landing bucket
-                minio_client.fput_object(
-                    'landing',
-                    filename,
-                    f'/tmp/{filename}'
-                )
-                
-                # Clean up temporary file
-                os.remove(f'/tmp/{filename}')
-                
-                print(f"Successfully ingested {filename} to MinIO landing zone")
-                
+        # Clean up
+        os.remove(local_path)
+        
+        logger.info(f"✅ Sample data ingested to landing zone: {filename}")
+        
+        # Store filename for next tasks
+        context['task_instance'].xcom_push(key='filename', value=filename)
+        
     except Exception as e:
-        print(f"Error in data ingestion: {str(e)}")
+        logger.error(f"❌ Data ingestion failed: {str(e)}")
         raise
 
 def process_to_bronze(**context):
     """
-    Process data from landing to bronze layer
+    Move data from landing to bronze with basic metadata
     """
     try:
         minio_client = create_minio_client()
         
-        # List objects in landing bucket
-        objects = minio_client.list_objects('landing')
+        # Get filename from previous task
+        filename = context['task_instance'].xcom_pull(task_ids='ingest_sample_data', key='filename')
         
-        for obj in objects:
-            print(f"Processing {obj.object_name} to bronze layer")
-            
-            # Get object from landing
-            response = minio_client.get_object('landing', obj.object_name)
-            
-            # For this example, we'll just copy to bronze with timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            bronze_key = f"{timestamp}_{obj.object_name}"
-            
-            # Save to bronze bucket
-            minio_client.put_object(
-                'bronze',
-                bronze_key,
-                response,
-                length=-1,
-                part_size=10*1024*1024
-            )
-            
-            print(f"Successfully processed {obj.object_name} to bronze layer as {bronze_key}")
-            
+        if not filename:
+            # If no filename from previous task, get the latest file from landing
+            objects = list(minio_client.list_objects('landing'))
+            if not objects:
+                raise Exception("No files found in landing bucket")
+            filename = max(objects, key=lambda x: x.last_modified).object_name
+        
+        logger.info(f"Processing {filename} to bronze layer")
+        
+        # Get object from landing
+        response = minio_client.get_object('landing', filename)
+        data = response.read()
+        
+        # Add metadata (in real scenario, you'd add more sophisticated metadata)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        bronze_filename = f"bronze_{timestamp}_{filename}"
+        
+        # Upload to bronze bucket
+        minio_client.put_object('bronze', bronze_filename, data, len(data))
+        
+        logger.info(f"✅ Data processed to bronze layer: {bronze_filename}")
+        
+        # Store bronze filename for next task
+        context['task_instance'].xcom_push(key='bronze_filename', value=bronze_filename)
+        
     except Exception as e:
-        print(f"Error in bronze processing: {str(e)}")
+        logger.error(f"❌ Bronze processing failed: {str(e)}")
         raise
 
-def submit_spark_job(**context):
+def simple_spark_processing(**context):
     """
-    Submit Spark job for data transformation
-    """
-    spark_submit_cmd = """
-    docker exec spark-master spark-submit \
-        --master spark://spark-master:7077 \
-        --deploy-mode client \
-        --class org.apache.spark.examples.SparkPi \
-        /opt/bitnami/spark/apps/data_transformation.py
-    """
-    
-    os.system(spark_submit_cmd)
-
-def process_to_silver(**context):
-    """
-    Process data from bronze to silver layer with Spark
-    This would typically involve data cleaning, validation, and standardization
+    Simple data processing (simulated Spark job)
     """
     try:
         minio_client = create_minio_client()
         
-        # List objects in bronze bucket
-        objects = minio_client.list_objects('bronze')
+        # Get bronze filename from previous task
+        bronze_filename = context['task_instance'].xcom_pull(task_ids='process_to_bronze', key='bronze_filename')
         
-        for obj in objects:
-            print(f"Processing {obj.object_name} to silver layer")
-            
-            # Get object from bronze
-            response = minio_client.get_object('bronze', obj.object_name)
-            
-            # Process data (this is a simplified example)
-            # In real scenarios, you would use Spark for complex transformations
-            
-            silver_key = f"processed_{obj.object_name}"
-            
-            # Save to silver bucket
-            minio_client.put_object(
-                'silver',
-                silver_key,
-                response,
-                length=-1,
-                part_size=10*1024*1024
-            )
-            
-            print(f"Successfully processed {obj.object_name} to silver layer as {silver_key}")
-            
+        if not bronze_filename:
+            # Get latest bronze file
+            objects = list(minio_client.list_objects('bronze'))
+            if not objects:
+                raise Exception("No files found in bronze bucket")
+            bronze_filename = max(objects, key=lambda x: x.last_modified).object_name
+        
+        logger.info(f"Processing {bronze_filename} with Spark-like transformation")
+        
+        # Get data from bronze
+        response = minio_client.get_object('bronze', bronze_filename)
+        data = response.read().decode('utf-8')
+        
+        # Simple data transformation (in real scenario, this would be done by Spark)
+        lines = data.strip().split('\n')
+        header = lines[0]
+        
+        # Add a computed column (salary_category)
+        new_header = header + ",salary_category"
+        processed_lines = [new_header]
+        
+        for line in lines[1:]:
+            parts = line.split(',')
+            if len(parts) >= 4:
+                try:
+                    salary = int(parts[3])
+                    if salary < 55000:
+                        category = "Low"
+                    elif salary < 65000:
+                        category = "Medium"
+                    else:
+                        category = "High"
+                    processed_lines.append(line + f",{category}")
+                except ValueError:
+                    processed_lines.append(line + ",Unknown")
+        
+        processed_data = '\n'.join(processed_lines)
+        
+        # Save to silver bucket
+        silver_filename = bronze_filename.replace('bronze_', 'silver_')
+        minio_client.put_object('silver', silver_filename, processed_data.encode('utf-8'), len(processed_data.encode('utf-8')))
+        
+        logger.info(f"✅ Data processed to silver layer: {silver_filename}")
+        
+        # Store silver filename for next task
+        context['task_instance'].xcom_push(key='silver_filename', value=silver_filename)
+        
     except Exception as e:
-        print(f"Error in silver processing: {str(e)}")
+        logger.error(f"❌ Spark processing failed: {str(e)}")
         raise
 
-def process_to_gold(**context):
+def create_analytics_data(**context):
     """
-    Process data from silver to gold layer for analytics
+    Create analytics-ready data in gold layer
     """
     try:
         minio_client = create_minio_client()
         
-        # List objects in silver bucket
-        objects = minio_client.list_objects('silver')
+        # Get silver filename from previous task
+        silver_filename = context['task_instance'].xcom_pull(task_ids='simple_spark_processing', key='silver_filename')
         
-        for obj in objects:
-            print(f"Processing {obj.object_name} to gold layer")
-            
-            # Get object from silver
-            response = minio_client.get_object('silver', obj.object_name)
-            
-            # Process data for analytics (aggregations, business logic, etc.)
-            gold_key = f"analytics_{obj.object_name}"
-            
-            # Save to gold bucket
-            minio_client.put_object(
-                'gold',
-                gold_key,
-                response,
-                length=-1,
-                part_size=10*1024*1024
-            )
-            
-            print(f"Successfully processed {obj.object_name} to gold layer as {gold_key}")
-            
+        if not silver_filename:
+            # Get latest silver file
+            objects = list(minio_client.list_objects('silver'))
+            if not objects:
+                raise Exception("No files found in silver bucket")
+            silver_filename = max(objects, key=lambda x: x.last_modified).object_name
+        
+        logger.info(f"Creating analytics data from {silver_filename}")
+        
+        # Get data from silver
+        response = minio_client.get_object('silver', silver_filename)
+        data = response.read().decode('utf-8')
+        
+        # Create analytics summary
+        lines = data.strip().split('\n')
+        
+        # Simple analytics: count by department and salary category
+        dept_count = {}
+        salary_category_count = {}
+        total_salary_by_dept = {}
+        
+        for line in lines[1:]:  # Skip header
+            parts = line.split(',')
+            if len(parts) >= 6:
+                dept = parts[2]
+                salary = int(parts[3]) if parts[3].isdigit() else 0
+                category = parts[5]
+                
+                # Count by department
+                dept_count[dept] = dept_count.get(dept, 0) + 1
+                
+                # Count by salary category
+                salary_category_count[category] = salary_category_count.get(category, 0) + 1
+                
+                # Total salary by department
+                total_salary_by_dept[dept] = total_salary_by_dept.get(dept, 0) + salary
+        
+        # Create analytics report
+        analytics_report = f"""Analytics Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+====================================================
+
+Department Summary:
+"""
+        
+        for dept, count in dept_count.items():
+            avg_salary = total_salary_by_dept.get(dept, 0) / count if count > 0 else 0
+            analytics_report += f"- {dept}: {count} employees, Average Salary: ${avg_salary:,.2f}\n"
+        
+        analytics_report += f"""
+Salary Category Distribution:
+"""
+        for category, count in salary_category_count.items():
+            analytics_report += f"- {category}: {count} employees\n"
+        
+        analytics_report += f"""
+Total Employees: {sum(dept_count.values())}
+Total Payroll: ${sum(total_salary_by_dept.values()):,.2f}
+"""
+        
+        # Save to gold bucket
+        gold_filename = f"analytics_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        minio_client.put_object('gold', gold_filename, analytics_report.encode('utf-8'), len(analytics_report.encode('utf-8')))
+        
+        logger.info(f"✅ Analytics data created in gold layer: {gold_filename}")
+        logger.info("Analytics Summary:")
+        logger.info(analytics_report)
+        
     except Exception as e:
-        print(f"Error in gold processing: {str(e)}")
+        logger.error(f"❌ Analytics creation failed: {str(e)}")
         raise
 
-def data_quality_check(**context):
+def pipeline_summary(**context):
     """
-    Perform data quality checks
+    Provide pipeline execution summary
     """
     try:
         minio_client = create_minio_client()
         
-        # Check each layer
-        layers = ['bronze', 'silver', 'gold']
+        # Count objects in each bucket
+        buckets = ['landing', 'bronze', 'silver', 'gold']
+        summary = "📊 Pipeline Execution Summary\n" + "="*50 + "\n"
         
-        for layer in layers:
-            objects = list(minio_client.list_objects(layer))
-            object_count = len(objects)
-            
-            print(f"{layer.capitalize()} layer contains {object_count} objects")
-            
-            if object_count == 0:
-                print(f"WARNING: {layer} layer is empty!")
-            
-        print("Data quality check completed")
+        for bucket in buckets:
+            try:
+                objects = list(minio_client.list_objects(bucket))
+                count = len(objects)
+                summary += f"{bucket.capitalize()}: {count} objects\n"
+                
+                if objects:
+                    latest = max(objects, key=lambda x: x.last_modified)
+                    summary += f"  Latest: {latest.object_name} ({latest.last_modified})\n"
+            except Exception as e:
+                summary += f"{bucket.capitalize()}: Error - {str(e)}\n"
+        
+        summary += f"\nPipeline completed at: {datetime.now()}\n"
+        summary += "="*50
+        
+        logger.info(summary)
+        
+        logger.info("✅ Pipeline execution completed successfully!")
         
     except Exception as e:
-        print(f"Error in data quality check: {str(e)}")
+        logger.error(f"❌ Pipeline summary failed: {str(e)}")
         raise
 
 # Task definitions
+check_services_task = PythonOperator(
+    task_id='check_services',
+    python_callable=check_services,
+    dag=dag,
+)
+
 ingest_task = PythonOperator(
-    task_id='ingest_from_s3',
-    python_callable=ingest_from_s3,
+    task_id='ingest_sample_data',
+    python_callable=ingest_sample_data,
     dag=dag,
 )
 
@@ -255,34 +345,23 @@ bronze_task = PythonOperator(
     dag=dag,
 )
 
-spark_task = BashOperator(
-    task_id='spark_transformation',
-    bash_command="""
-    docker exec spark-master spark-submit \
-        --master spark://spark-master:7077 \
-        --deploy-mode client \
-        /opt/bitnami/spark/apps/data_transformation.py || true
-    """,
-    dag=dag,
-)
-
-silver_task = PythonOperator(
-    task_id='process_to_silver',
-    python_callable=process_to_silver,
+spark_task = PythonOperator(
+    task_id='simple_spark_processing',
+    python_callable=simple_spark_processing,
     dag=dag,
 )
 
 gold_task = PythonOperator(
-    task_id='process_to_gold',
-    python_callable=process_to_gold,
+    task_id='create_analytics_data',
+    python_callable=create_analytics_data,
     dag=dag,
 )
 
-quality_check_task = PythonOperator(
-    task_id='data_quality_check',
-    python_callable=data_quality_check,
+summary_task = PythonOperator(
+    task_id='pipeline_summary',
+    python_callable=pipeline_summary,
     dag=dag,
 )
 
-# Task dependencies (Medallion Architecture Flow)
-ingest_task >> bronze_task >> spark_task >> silver_task >> gold_task >> quality_check_task
+# Task dependencies
+check_services_task >> ingest_task >> bronze_task >> spark_task >> gold_task >> summary_task

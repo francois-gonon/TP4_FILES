@@ -1,8 +1,8 @@
 # Data Pipeline Startup Script
-# This script sets up and starts the complete data pipeline with Spark, Airflow, and MinIO
+# Medallion Architecture with Spark, Airflow, and MinIO
 
 Write-Host "=====================================" -ForegroundColor Cyan
-Write-Host "   Data Pipeline Setup & Startup    " -ForegroundColor Cyan
+Write-Host "   Data Pipeline Startup             " -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -22,7 +22,7 @@ function Wait-ForService {
     param(
         [string]$ServiceName,
         [string]$Url,
-        [int]$TimeoutSeconds = 300
+        [int]$TimeoutSeconds = 180
     )
     
     Write-Host "Waiting for $ServiceName to be ready..." -ForegroundColor Yellow
@@ -30,7 +30,7 @@ function Wait-ForService {
     
     do {
         try {
-            $response = Invoke-WebRequest -Uri $Url -TimeoutSec 5 -UseBasicParsing
+            $response = Invoke-WebRequest -Uri $Url -TimeoutSec 10 -UseBasicParsing
             if ($response.StatusCode -eq 200) {
                 Write-Host "$ServiceName is ready!" -ForegroundColor Green
                 return $true
@@ -68,19 +68,13 @@ foreach ($dir in $directories) {
     }
 }
 
-# Set permissions for Airflow (if on Linux subsystem)
-Write-Host "Setting up Airflow directories..." -ForegroundColor Blue
-if (Test-Path "logs") {
-    # Ensure logs directory is writable
-}
-
 # Stop any existing containers
 Write-Host "Stopping any existing containers..." -ForegroundColor Blue
 docker-compose down 2>$null
 
-# Build and start the services
-Write-Host "Building and starting services..." -ForegroundColor Blue
-docker-compose up -d --build
+# Start the data pipeline services
+Write-Host "Starting data pipeline..." -ForegroundColor Blue
+docker-compose up -d
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Failed to start services. Check the logs above." -ForegroundColor Red
@@ -96,9 +90,12 @@ if (Wait-ForService -ServiceName "MinIO" -Url "http://localhost:9001") {
     Write-Host "MinIO Console: http://localhost:9001 (minioadmin/minioadmin123)" -ForegroundColor Cyan
 }
 
-# Wait for Airflow
-if (Wait-ForService -ServiceName "Airflow" -Url "http://localhost:8080") {
+# Wait for Airflow (this may take longer)
+Write-Host "Waiting for Airflow to initialize (this may take a few minutes)..." -ForegroundColor Yellow
+if (Wait-ForService -ServiceName "Airflow" -Url "http://localhost:8080" -TimeoutSeconds 300) {
     Write-Host "Airflow UI: http://localhost:8080 (admin/admin)" -ForegroundColor Cyan
+} else {
+    Write-Host "Airflow is taking longer than expected. You can check manually at http://localhost:8080" -ForegroundColor Yellow
 }
 
 # Wait for Spark
@@ -106,49 +103,30 @@ if (Wait-ForService -ServiceName "Spark" -Url "http://localhost:8081") {
     Write-Host "Spark UI: http://localhost:8081" -ForegroundColor Cyan
 }
 
-# Initialize Airflow database and create admin user
-Write-Host ""
-Write-Host "Initializing Airflow..." -ForegroundColor Blue
-Start-Sleep -Seconds 10
-
-docker exec airflow-init airflow db init 2>$null
-docker exec airflow-init airflow users create `
-    --username admin `
-    --firstname Admin `
-    --lastname User `
-    --role Admin `
-    --email admin@example.com `
-    --password admin 2>$null
-
-# Setup connections
-Write-Host ""
-Write-Host "Setting up Airflow connections..." -ForegroundColor Blue
-Start-Sleep -Seconds 5
-
-# Run the connection setup script
-& .\scripts\setup_connections.ps1
-
 Write-Host ""
 Write-Host "=====================================" -ForegroundColor Green
-Write-Host "   Pipeline Setup Complete!         " -ForegroundColor Green
+Write-Host "   Pipeline Ready!                  " -ForegroundColor Green
 Write-Host "=====================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Access Points:" -ForegroundColor Yellow
 Write-Host "• Airflow UI:    http://localhost:8080 (admin/admin)" -ForegroundColor White
 Write-Host "• MinIO Console: http://localhost:9001 (minioadmin/minioadmin123)" -ForegroundColor White
 Write-Host "• Spark UI:      http://localhost:8081" -ForegroundColor White
-Write-Host "• PostgreSQL:    localhost:5432 (airflow/airflow)" -ForegroundColor White
 Write-Host ""
-Write-Host "Medallion Architecture Buckets:" -ForegroundColor Yellow
+Write-Host "Medallion Architecture:" -ForegroundColor Yellow
 Write-Host "• landing: Raw data ingestion" -ForegroundColor White
 Write-Host "• bronze:  Raw data with metadata" -ForegroundColor White
-Write-Host "• silver:  Cleaned and validated data" -ForegroundColor White
+Write-Host "• silver:  Cleaned and processed data" -ForegroundColor White
 Write-Host "• gold:    Analytics-ready data" -ForegroundColor White
 Write-Host ""
 Write-Host "Next Steps:" -ForegroundColor Yellow
-Write-Host "1. Open Airflow UI and enable the 'medallion_data_pipeline' DAG" -ForegroundColor White
-Write-Host "2. Trigger the pipeline to start data processing" -ForegroundColor White
-Write-Host "3. Monitor progress in the Airflow UI" -ForegroundColor White
-Write-Host "4. Check data in MinIO buckets" -ForegroundColor White
+Write-Host "1. Open Airflow UI at http://localhost:8080" -ForegroundColor White
+Write-Host "2. Enable the 'medallion_pipeline' DAG" -ForegroundColor White
+Write-Host "3. Trigger the pipeline manually" -ForegroundColor White
+Write-Host "4. Monitor progress in Airflow UI" -ForegroundColor White
+Write-Host "5. Check results in MinIO Console" -ForegroundColor White
 Write-Host ""
-Write-Host "To stop the pipeline: docker-compose down" -ForegroundColor Cyan
+Write-Host "To stop: docker-compose down" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Checking service status..." -ForegroundColor Blue
+docker-compose ps

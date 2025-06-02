@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # MinIO Object Storage
@@ -16,247 +16,83 @@ services:
       - minio_data:/data
     networks:
       - data_pipeline
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
 
-  # MinIO Client for bucket initialization
+  # MinIO Client for bucket initialization (waits until MinIO is healthy)
   minio-init:
     image: minio/mc:latest
     container_name: minio-init
     depends_on:
-      - minio
-    volumes:
-      - ./scripts:/scripts
-    entrypoint: >
+      minio:
+        condition: service_healthy
+    entrypoint: |
       /bin/sh -c "
-      sleep 10;
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123;
-      /usr/bin/mc mb myminio/bronze --ignore-existing;
-      /usr/bin/mc mb myminio/silver --ignore-existing;
-      /usr/bin/mc mb myminio/gold --ignore-existing;
-      /usr/bin/mc mb myminio/landing --ignore-existing;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      mc mb myminio/landing --ignore-existing;
+      mc mb myminio/bronze  --ignore-existing;
+      mc mb myminio/silver  --ignore-existing;
+      mc mb myminio/gold    --ignore-existing;
       echo 'MinIO buckets created successfully';
       "
     networks:
       - data_pipeline
 
-  # PostgreSQL for Airflow metadata
-  postgres:
-    image: postgres:13
-    container_name: postgres
+  # Airflow (SQLite + SequentialExecutor)
+  airflow:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: airflow
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-    volumes:
-      - postgres_db_volume:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    networks:
-      - data_pipeline
-
-  # Redis for Airflow Celery
-  redis:
-    image: redis:latest
-    container_name: redis
-    ports:
-      - "6379:6379"
-    networks:
-      - data_pipeline
-
-  # Airflow Webserver
-  airflow-webserver:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: airflow-webserver
-    restart: always
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 minio'
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./scripts:/opt/airflow/scripts
-    ports:
-      - "8080:8080"
-    command: webserver
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - data_pipeline
-
-  # Airflow Scheduler
-  airflow-scheduler:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: airflow-scheduler
-    restart: always
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-      AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 minio'
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./scripts:/opt/airflow/scripts
-    command: scheduler
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - data_pipeline
-
-  # Airflow Worker
-  airflow-worker:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: airflow-worker
-    restart: always
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-      AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 minio'
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./scripts:/opt/airflow/scripts
-    command: celery worker
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - data_pipeline
-
-  # Airflow Init
-  airflow-init:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: airflow-init
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-      AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
       _AIRFLOW_DB_UPGRADE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
-      _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 minio'
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-      - ./scripts:/opt/airflow/scripts
-    command: version
-    networks:
-      - data_pipeline
-
-  # Spark Master
-  spark-master:
-    image: bitnami/spark:3.4
-    container_name: spark-master
-    environment:
-      - SPARK_MODE=master
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
+      - airflow_db:/opt/airflow/airflow.db
     ports:
-      - "8081:8080"
-      - "7077:7077"
-    volumes:
-      - ./spark/apps:/opt/bitnami/spark/apps
-      - ./spark/data:/opt/bitnami/spark/data
+      - "8080:8080"
+    command: >
+      bash -c "pip install boto3 minio requests pandas &&
+               airflow db init &&
+               airflow users create \
+                 --username admin \
+                 --firstname Admin \
+                 --lastname User \
+                 --role Admin \
+                 --email admin@example.com \
+                 --password admin || true &&
+               airflow webserver --port 8080 & 
+               airflow scheduler"
     networks:
       - data_pipeline
 
-  # Spark Worker 1
-  spark-worker-1:
-    image: bitnami/spark:3.4
-    container_name: spark-worker-1
+  # Spark standalone (master + worker in one container)
+  spark:
+    image: bitnami/spark:3.5
+    container_name: spark
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_MODE=standalone
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
-    depends_on:
-      - spark-master
-    volumes:
-      - ./spark/apps:/opt/bitnami/spark/apps
-      - ./spark/data:/opt/bitnami/spark/data
-    networks:
-      - data_pipeline
-
-  # Spark Worker 2
-  spark-worker-2:
-    image: bitnami/spark:3.4
-    container_name: spark-worker-2
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-    depends_on:
-      - spark-master
+      - SPARK_MASTER_OPTS=-Dspark.worker.cleanup.enabled=true
+    ports:
+      - "8080:8080"   # Spark Master UI
+      - "8081:8081"   # Spark Worker UI
+      - "7077:7077"   # Spark Master port
     volumes:
       - ./spark/apps:/opt/bitnami/spark/apps
       - ./spark/data:/opt/bitnami/spark/data
@@ -265,7 +101,7 @@ services:
 
 volumes:
   minio_data:
-  postgres_db_volume:
+  airflow_db:
 
 networks:
   data_pipeline:
