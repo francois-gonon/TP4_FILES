@@ -45,14 +45,13 @@ services:
       "
     networks:
       - data_pipeline
-
   # Airflow (SQLite + SequentialExecutor)
   airflow:
     image: apache/airflow:2.8.0-python3.11
     container_name: airflow
     environment:
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/db/airflow.db
       AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -65,7 +64,7 @@ services:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-      - airflow_db:/opt/airflow/airflow.db
+      - ./airflow-db:/opt/airflow/db
     ports:
       - "8080:8080"
     command: >
@@ -132,7 +131,6 @@ volumes:
       type: none
       o: bind
       device: ./minio-data
-  airflow_db:
 
 networks:
   data_pipeline:
