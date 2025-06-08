@@ -44,8 +44,7 @@ services:
       echo 'Local files uploaded to MinIO landing bucket successfully';
       "
     networks:
-      - data_pipeline
-  # Airflow (SQLite + SequentialExecutor)
+      - data_pipeline  # Airflow (SQLite + SequentialExecutor)
   airflow:
     image: apache/airflow:2.8.0-python3.11
     container_name: airflow
@@ -65,10 +64,13 @@ services:
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
       - ./airflow-db:/opt/airflow/db
+      - ./spark/jobs:/opt/airflow/jobs  # Mount Spark job scripts into Airflow container
+      - /var/run/docker.sock:/var/run/docker.sock  # Allow docker commands
+      - /usr/bin/docker:/usr/bin/docker         # Docker CLI inside container
     ports:
       - "8080:8080"
     command: >
-      bash -c "pip install boto3 minio requests pandas &&
+      bash -c "pip install boto3 minio requests pandas pyspark==3.5.0 pyarrow &&
                airflow db init &&
                airflow users create \
                  --username admin \
@@ -80,10 +82,9 @@ services:
                airflow webserver --port 8080 & 
                airflow scheduler"
     networks:
-      - data_pipeline
-  # Spark Master
+      - data_pipeline  # Spark Master
   spark-master:
-    image: bitnami/spark:3.5
+    build: ./spark
     container_name: spark-master
     environment:
       - SPARK_MODE=master
@@ -91,19 +92,19 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
-      - SPARK_MASTER_OPTS=-Dspark.worker.cleanup.enabled=true
+      - SPARK_MASTER_OPTS=-Dspark.worker.cleanup.enabled=true -Dspark.master.rest.enabled=true
     ports:
       - "8082:8080"   # Spark Master UI (changed from 8080 to avoid conflict)
       - "7077:7077"   # Spark Master port
     volumes:
       - ./spark/apps:/opt/bitnami/spark/apps
+      - ./spark/jobs:/opt/bitnami/spark/jobs
       - ./spark/data:/opt/bitnami/spark/data
+      - ./source:/opt/bitnami/spark/source
     networks:
-      - data_pipeline
-
-  # Spark Worker
+      - data_pipeline  # Spark Worker
   spark-worker:
-    image: bitnami/spark:3.5
+    build: ./spark
     container_name: spark-worker
     environment:
       - SPARK_MODE=worker
@@ -120,7 +121,9 @@ services:
       - spark-master
     volumes:
       - ./spark/apps:/opt/bitnami/spark/apps
+      - ./spark/jobs:/opt/bitnami/spark/jobs
       - ./spark/data:/opt/bitnami/spark/data
+      - ./source:/opt/bitnami/spark/source
     networks:
       - data_pipeline
 

@@ -121,10 +121,16 @@ Write-Host "• gold:    Analytics-ready data" -ForegroundColor White
 Write-Host ""
 Write-Host "Next Steps:" -ForegroundColor Yellow
 Write-Host "1. Open Airflow UI at http://localhost:8080" -ForegroundColor White
-Write-Host "2. Enable the 'medallion_pipeline' DAG" -ForegroundColor White
+Write-Host "2. Enable the 'medallion_spark_pipeline' DAG" -ForegroundColor White
 Write-Host "3. Trigger the pipeline manually" -ForegroundColor White
-Write-Host "4. Monitor progress in Airflow UI" -ForegroundColor White
+Write-Host "4. Monitor Spark jobs in Spark UI at http://localhost:8082" -ForegroundColor White
 Write-Host "5. Check results in MinIO Console" -ForegroundColor White
+Write-Host ""
+Write-Host "🚀 ENHANCED SPARK ARCHITECTURE:" -ForegroundColor Yellow
+Write-Host "• Distributed processing with Apache Spark" -ForegroundColor White
+Write-Host "• Production-grade error handling and monitoring" -ForegroundColor White
+Write-Host "• Comprehensive data quality validation" -ForegroundColor White
+Write-Host "• Advanced analytics and business insights" -ForegroundColor White
 Write-Host ""
 Write-Host "To stop: docker-compose down" -ForegroundColor Cyan
 Write-Host ""
